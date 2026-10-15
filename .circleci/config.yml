@@ -1,0 +1,30 @@
+﻿version: 2.1
+
+jobs:
+  build-and-check:
+    docker:
+      - image: cimg/python:3.12
+
+    steps:
+      - checkout
+
+      - run:
+          name: Install Python dependencies
+          command: |
+            python -m pip install --upgrade pip
+            pip install -r requirements.txt
+
+      - run:
+          name: Check Python syntax
+          command: python -m compileall -q app
+
+      - setup_remote_docker
+
+      - run:
+          name: Build Docker image
+          command: docker build -t delivery-tracker:latest .
+
+workflows:
+  build-and-check:
+    jobs:
+      - build-and-check
