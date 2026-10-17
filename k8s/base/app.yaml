@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: delivery-tracker
+  labels:
+    app: delivery-tracker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: delivery-tracker
+  template:
+    metadata:
+      labels:
+        app: delivery-tracker
+    spec:
+      imagePullSecrets:
+        - name: dockerhub
+      initContainers:
+        - name: migrate
+          image: delivery-tracker-python:qa
+          imagePullPolicy: Always
+          command: ["python", "-m", "app.migrate"]
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: tracker-db
+                  key: password
+            - name: DATABASE_URL
+              value: postgresql://tracker:$(DB_PASSWORD)@postgres:5432/tracker
+      containers:
+        - name: app
+          image: delivery-tracker-python:qa
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: tracker-db
+                  key: password
+            - name: DATABASE_URL
+              value: postgresql://tracker:$(DB_PASSWORD)@postgres:5432/tracker
+            - name: REDIS_URL
+              value: redis://redis:6379/0
+          startupProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: delivery-tracker
+spec:
+  selector:
+    app: delivery-tracker
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+  type: ClusterIP
