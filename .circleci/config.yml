@@ -1,30 +1,101 @@
 ﻿version: 2.1
 
 jobs:
-  build-and-check:
+  lint:
     docker:
       - image: cimg/python:3.12
-
     steps:
       - checkout
-
       - run:
-          name: Install Python dependencies
+          name: Install development dependencies
+          command: pip install -r requirements-dev.txt
+      - run:
+          name: Lint Python code
+          command: ruff check app tests
+
+  unit-tests:
+    docker:
+      - image: cimg/python:3.12
+    steps:
+      - checkout
+      - run:
+          name: Install development dependencies
+          command: pip install -r requirements-dev.txt
+      - run:
+          name: Run unit tests
+          command: python -m pytest tests/test_states.py -v
+
+  integration-tests:
+    docker:
+      - image: cimg/python:3.12
+        environment:
+          DATABASE_URL: postgresql://tracker:tracker@localhost:5432/tracker_test
+          REDIS_URL: redis://localhost:6379/1
+          RUN_INTEGRATION: "1"
+      - image: postgres:16
+        environment:
+          POSTGRES_USER: tracker
+          POSTGRES_PASSWORD: tracker
+          POSTGRES_DB: tracker_test
+      - image: redis:7
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies and PostgreSQL client
           command: |
-            python -m pip install --upgrade pip
-            pip install -r requirements.txt
-
+            pip install -r requirements-dev.txt
+            sudo apt-get update
+            sudo apt-get install -y postgresql-client
       - run:
-          name: Check Python syntax
-          command: python -m compileall -q app
+          name: Wait for services
+          command: |
+            for i in $(seq 1 30); do
+              pg_isready -h localhost -p 5432 -U tracker && break
+              sleep 2
+            done
+            pg_isready -h localhost -p 5432 -U tracker
+      - run:
+          name: Apply database migrations
+          command: |
+            PGPASSWORD=tracker psql -h localhost -U tracker -d tracker_test -v ON_ERROR_STOP=1 -f migrations/001_schema.sql
+            PGPASSWORD=tracker psql -h localhost -U tracker -d tracker_test -v ON_ERROR_STOP=1 -f migrations/002_seed.sql
+      - run:
+          name: Run integration tests and check coverage
+          command: python -m pytest tests/test_integration.py -v --cov=app --cov-report=term-missing --cov-fail-under=70
 
+  secret-scan:
+    docker:
+      - image: zricethezav/gitleaks:v8.24.2
+    steps:
+      - checkout
+      - run:
+          name: Scan repository for secrets
+          command: detect --source . --redact --exit-code 1
+
+  image-build:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - checkout
       - setup_remote_docker
-
       - run:
           name: Build Docker image
-          command: docker build -t delivery-tracker:latest .
+          command: docker build -t delivery-tracker:1.0 .
 
 workflows:
-  build-and-check:
+  delivery-tracker-pipeline:
     jobs:
-      - build-and-check
+      - lint
+      - unit-tests:
+          requires:
+            - lint
+      - integration-tests:
+          requires:
+            - unit-tests
+      - secret-scan:
+          requires:
+            - integration-tests
+      - image-build:
+          requires:
+            - secret-scan
+

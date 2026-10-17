@@ -1,4 +1,4 @@
-﻿FROM python:3.12-slim
+﻿FROM python:3.12.12-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -6,11 +6,14 @@ ENV PYTHONUNBUFFERED=1
 WORKDIR /code
 
 COPY requirements.txt .
-
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app/ ./app/
-COPY migrations/ ./migrations/
+RUN useradd --create-home --uid 10001 appuser
+
+COPY --chown=appuser:appuser app/ ./app/
+COPY --chown=appuser:appuser migrations/ ./migrations/
+
+USER appuser
 
 EXPOSE 8080
 
