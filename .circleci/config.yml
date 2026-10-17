@@ -1,6 +1,15 @@
-﻿version: 2.1
+version: 2.1
 
 jobs:
+  secret-scan:
+    docker:
+      - image: zricethezav/gitleaks:v8.24.2
+    steps:
+      - checkout
+      - run:
+          name: Scan repository for secrets
+          command: detect --source . --redact --exit-code 1
+
   lint:
     docker:
       - image: cimg/python:3.12
@@ -23,7 +32,7 @@ jobs:
           command: pip install -r requirements-dev.txt
       - run:
           name: Run unit tests
-          command: python -m pytest tests/test_states.py -v
+          command: python -m pytest tests/test_states.py tests/test_api.py -v
 
   integration-tests:
     docker:
@@ -41,61 +50,109 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Install dependencies and PostgreSQL client
+          name: Install development dependencies
           command: |
             pip install -r requirements-dev.txt
             sudo apt-get update
             sudo apt-get install -y postgresql-client
       - run:
-          name: Wait for services
+          name: Wait for Postgres and Redis
           command: |
             for i in $(seq 1 30); do
               pg_isready -h localhost -p 5432 -U tracker && break
               sleep 2
             done
             pg_isready -h localhost -p 5432 -U tracker
+            for i in $(seq 1 30); do
+              python -c "import redis; redis.Redis.from_url('redis://localhost:6379/1').ping()" && break
+              sleep 2
+            done
+            python -c "import redis; redis.Redis.from_url('redis://localhost:6379/1').ping()"
       - run:
           name: Apply database migrations
-          command: |
-            PGPASSWORD=tracker psql -h localhost -U tracker -d tracker_test -v ON_ERROR_STOP=1 -f migrations/001_schema.sql
-            PGPASSWORD=tracker psql -h localhost -U tracker -d tracker_test -v ON_ERROR_STOP=1 -f migrations/002_seed.sql
+          command: python -m app.migrate
       - run:
-          name: Run integration tests and check coverage
+          name: Run integration tests
           command: python -m pytest tests/test_integration.py -v --cov=app --cov-report=term-missing --cov-fail-under=70
 
-  secret-scan:
-    docker:
-      - image: zricethezav/gitleaks:v8.24.2
-    steps:
-      - checkout
-      - run:
-          name: Scan repository for secrets
-          command: detect --source . --redact --exit-code 1
-
-  image-build:
+  publish-image:
+    parameters:
+      moving_tag:
+        type: string
+      branch_tag:
+        type: string
     docker:
       - image: cimg/base:stable
     steps:
       - checkout
       - setup_remote_docker
       - run:
-          name: Build Docker image
-          command: docker build -t delivery-tracker:1.0 .
+          name: Build and push Docker image
+          command: |
+            set -eu
+            : "${DOCKERHUB_USER:?Set DOCKERHUB_USER in CircleCI project environment variables}"
+            : "${DOCKERHUB_TOKEN:?Set DOCKERHUB_TOKEN in CircleCI project environment variables}"
+            image="${DOCKERHUB_USER}/delivery-tracker-python"
+            short_sha="$(printf '%s' "$CIRCLE_SHA1" | cut -c1-7)"
+            docker login --username "$DOCKERHUB_USER" --password-stdin <<< "$DOCKERHUB_TOKEN"
+            docker build \
+              --tag "${image}:<< parameters.moving_tag >>" \
+              --tag "${image}:<< parameters.branch_tag >>-${short_sha}" \
+              .
+            docker push "${image}:<< parameters.moving_tag >>"
+            docker push "${image}:<< parameters.branch_tag >>-${short_sha}"
 
 workflows:
-  delivery-tracker-pipeline:
+  delivery-tracker-qa:
     jobs:
-      - lint
+      - secret-scan:
+          filters:
+            branches:
+              only: main
+      - lint:
+          requires:
+            - secret-scan
+          filters:
+            branches:
+              only: main
       - unit-tests:
           requires:
             - lint
+          filters:
+            branches:
+              only: main
       - integration-tests:
           requires:
             - unit-tests
-      - secret-scan:
+          filters:
+            branches:
+              only: main
+      - publish-image:
+          name: publish-qa
+          moving_tag: qa
+          branch_tag: main
           requires:
             - integration-tests
-      - image-build:
-          requires:
-            - secret-scan
+          filters:
+            branches:
+              only: main
 
+  delivery-tracker-stage:
+    jobs:
+      - publish-image:
+          name: publish-stage
+          moving_tag: stage
+          branch_tag: staging
+          filters:
+            branches:
+              only: staging
+
+  delivery-tracker-prod:
+    jobs:
+      - publish-image:
+          name: publish-prod
+          moving_tag: prod
+          branch_tag: prod
+          filters:
+            branches:
+              only: prod

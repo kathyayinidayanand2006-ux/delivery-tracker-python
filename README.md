@@ -1,115 +1,150 @@
 # Food Delivery Order Tracker
 
-**Language:** Python (FastAPI) &nbsp;|&nbsp; **Needs:** Postgres + Redis
+A FastAPI application for tracking delivery order state across restaurant staff, customers, and kitchen views. The service uses PostgreSQL as the source of truth, Redis for caching and pub/sub notifications, and a pure state machine in `app/states.py` to enforce legal transitions.
 
-This is a **starter**. The application already works. Your job is everything
-that gets it building, tested and running in CI.
+## Tech stack
 
----
+- Python 3.12
+- FastAPI
+- PostgreSQL
+- Redis
+- Docker + Docker Compose
+- pytest + Ruff
 
-## You do not need Python installed
-
-You will build this into a container, and the container brings its own
-Python 3.12. You are not being asked to extend the app — you are being asked
-to ship it.
-
----
-
-## 1. What this app needs
-
-| | |
-|---|---|
-| **Runtime** | Python 3.12 |
-| **Install dependencies** | `pip install -r requirements.txt` |
-| **Start the app** | `uvicorn app.main:app --host 0.0.0.0 --port 8080` |
-| **Listens on** | port 8080, bound to `0.0.0.0` |
-| **Environment variables** | `DATABASE_URL`, `REDIS_URL` |
-| **Needs running first** | Postgres, Redis, and the migrations applied |
-
-### What it does
-
-An order goes placed -> accepted -> cooking -> out for delivery -> delivered. Restaurant staff push it along, customers watch it move, and a customer can cancel - but only until the kitchen starts cooking. Every change is published so a watching client hears about it without polling.
-
-### Endpoints
-
-```
-GET  /health
-POST /orders                      {"customer":"asha","restaurant":"Sagar",
-                                   "items":[{"name":"Dosa","paise":12000}]}
-GET  /orders/{id}                 current state, served from the cache
-POST /orders/{id}/status          {"to":"cooking","expected":"accepted","actor":"raj"}
-POST /orders/{id}/cancel          {"actor":"asha"}
-GET  /orders/{id}/watch?timeout=5 blocks on pub/sub until the status moves
-GET  /restaurants/{name}/queue    what the kitchen still has to do
-```
-
-`/health` reports Postgres and Redis **separately**. If it says
-`postgres: false` the app started fine and your compose wiring is wrong —
-do not go looking in the application code.
-
-### Migrations
-
-`migrations/` holds `.sql` files applied **in filename order** before the app
-starts. They create the tables and insert sample data. A container running
-`psql` over them in order is enough; you do not need a migration tool.
-
----
-
-## 2. What you must write
-
-| File | What it has to do |
-|---|---|
-| `Dockerfile` | Install dependencies **before** copying source, pin the base image, do not run as root. |
-| `docker-compose.yml` | App + Postgres + Redis + a migration step, one `docker compose up`. |
-| `.circleci/config.yml` | lint → unit tests → integration tests → secret scan → image build |
-| Unit tests | For `app/states.py`. No database, no network. |
-| Integration tests | Against a real Postgres and Redis as CircleCI service containers. |
-
-Then push your image to **your own Docker Hub account**, tagged `:1.0`.
-
-### When it works
+## Local run
 
 ```bash
 docker compose up --build
-curl localhost:8080/health
+curl http://localhost:8080/health
 ```
+
+Expected health output:
 
 ```json
 {"status":"ok","postgres":true,"redis":true}
 ```
 
----
+## Endpoints
 
-## Where the marks are
+- `GET /health` — checks PostgreSQL and Redis separately
+- `POST /orders` — create a new order
+- `GET /orders/{id}` — fetch current order state, served from cache when available
+- `DELETE /orders/{id}` — delete a delivered or cancelled order
+- `POST /orders/{id}/status` — advance or reject a status transition
+- `POST /orders/{id}/cancel` — cancel before cooking begins
+- `GET /orders/{id}/watch` — wait for a pub/sub update
+- `GET /restaurants/{name}/queue` — return outstanding orders for a restaurant
 
-`app/states.py` is **pure logic** — plain functions over plain data, no
-database and no HTTP. Start your tests there. Use pytest:
-`pytest --cov=app --cov-report=term-missing`. Minimum 70%.
+Order lifecycle:
 
-`app/states.py` has no database in it, so the whole state machine is testable directly. Walk every pair of statuses - there are only thirty-six - and assert `can_move` agrees with the TRANSITIONS table. Then the interesting ones: `is_backwards` must separate 'illegal' from 'somebody beat you to it', because those are a 400 and a 409 and the difference matters to whoever is on the other end.
+`placed -> accepted -> cooking -> out_for_delivery -> delivered`
 
-## Why Redis is here
+A customer may cancel only while the order is still before cooking starts.
+Orders can be deleted only after they reach a terminal state. Deleting an order
+also removes its event history through the database foreign-key cascade and
+invalidates its cached snapshot.
 
-Two jobs. Every status change is PUBLISHed on `orders:{id}` and `orders:all`, so a screen in the kitchen and the customer's phone both hear it without hammering the database every second. And each order's current state is cached, because 'where is my food' is asked far more often than it is answered.
+For a complete local CRUD demonstration, create an order with `POST /orders`,
+read it with `GET /orders/{id}`, advance it through the status endpoint until
+it is delivered, then delete it with `DELETE /orders/{id}`. Check persistence
+with `docker compose exec db psql -U tracker -d tracker -c 'SELECT id, status FROM orders;'`.
 
-Note what the cache is *not* used for: deciding whether a transition is legal. A cache can be stale, and a stale cache that is allowed to authorise a state change is how an order goes backwards.
+## Why the database is the authority
 
-## The hard part
+The subtle bug is a classic read-then-write race:
 
-**Two restaurant staff updating the same order at the same time must not move it backwards.**
+1. Staff member A reads the order and sees `accepted`.
+2. Staff member B reads the same order and also sees `accepted`.
+3. A writes `cooking`.
+4. B writes `cancelled` or an earlier status based on stale data.
 
-Both have the order open showing the same status, and both tap the button they see. Work out why read-then-write loses here, make the database refuse the second one, then prove it by firing two updates at the same order in parallel.
+If that stale write is allowed, the order moves backwards, which violates the business rule and breaks customer trust.
 
-Write your answer in your README. It is worth more marks than the feature.
+The fix is to make the database reject stale writes. The application does this by checking `expected` against the current status in code and then issuing a conditional update:
 
----
+```sql
+UPDATE orders
+SET status = %s, version = version + 1, updated_at = now()
+WHERE id = %s AND status = %s
+RETURNING id
+```
 
-## Getting unstuck
+The `WHERE status = current_status` clause means the second writer does not overwrite the first. If a row is not updated, the app raises a conflict (`409`) instead of silently undoing progress. This is exactly why the `expected` field is included in the API payload and why `is_backwards` is treated separately from an illegal transition.
 
-| Symptom | Almost always |
-|---|---|
-| `/health` says `postgres: false` | Wrong hostname. In compose the host is the **service name**, not `localhost`. |
-| Page will not load, logs fine | No `ports:` mapping, or bound to `127.0.0.1` not `0.0.0.0`. |
-| `relation "..." does not exist` | Migrations did not run, or the app started before they finished. |
-| Build takes minutes each time | `COPY . .` is above your dependency install. |
-| CI cannot reach the database | In CircleCI service containers the host **is** `localhost` — opposite of compose. |
+## State machine
+
+`app/states.py` contains the pure logic used to validate transitions and guard concurrency. It covers:
+
+- all legal transitions
+- invalid moves
+- cancellation rules
+- terminal states
+- progress and remaining stages
+- stale expected-status checks
+
+The state-machine and API unit tests do not require PostgreSQL or Redis. The
+integration tests verify behavior against real PostgreSQL and Redis services.
+
+## CI pipeline
+
+On `main`, CircleCI runs secret scanning, Ruff, unit tests, integration tests
+against real Postgres and Redis services, then builds and pushes the Docker
+image to Docker Hub as `qa` and `main-<short-sha>`. On `staging` and `prod`,
+it only builds and pushes the corresponding moving tag (`stage` or `prod`) and
+immutable branch/SHA tag. Configure `DOCKERHUB_USER` and a Docker Hub access
+token in CircleCI project environment variables as `DOCKERHUB_USER` and
+`DOCKERHUB_TOKEN`; do not put credentials in the repository.
+
+## Kubernetes
+
+The manifests under `k8s/` use one shared base and separate `qa`, `stage`, and
+`prod` overlays. Each namespace has the application, Postgres (with a PVC),
+and Redis; application Pods run migrations in an init container, use the
+namespace's Docker Hub pull secret, and pull their own moving tag with
+`imagePullPolicy: Always`. Replace `REPLACE_WITH_DOCKERHUB_USER` in each
+overlay's `kustomization.yaml` with the Docker Hub account that owns
+`delivery-tracker-python`.
+
+Create the namespaces, then create a Docker Hub pull secret and a database
+password secret in **each** namespace before applying the matching overlay:
+
+```powershell
+kubectl apply -f k8s/namespaces.yaml
+foreach ($ns in @("qa", "stage", "prod")) {
+  kubectl create secret docker-registry dockerhub -n $ns `
+    --docker-username="$env:DOCKERHUB_USER" `
+    --docker-password="$env:DOCKERHUB_TOKEN"
+  kubectl create secret generic tracker-db -n $ns `
+    --from-literal=password="$env:TRACKER_DB_PASSWORD"
+}
+kubectl apply -k k8s/overlays/qa
+kubectl apply -k k8s/overlays/stage
+kubectl apply -k k8s/overlays/prod
+```
+
+Set `TRACKER_DB_PASSWORD` locally before running those commands. Do not commit
+it. After a `main` PR merges and CircleCI pushes the new `qa` image, refresh
+the deployment and verify the rollout and image digest:
+
+```powershell
+kubectl rollout restart deployment/delivery-tracker -n qa
+kubectl rollout status deployment/delivery-tracker -n qa
+kubectl get pods -n qa -o jsonpath='{range .items[*]}{.spec.containers[*].image}{"\n"}{end}'
+kubectl get pod <pod-name> -n qa -o jsonpath='{.status.containerStatuses[0].imageID}'
+```
+
+Compare the returned digest with the digest reported for the image pushed by
+the corresponding CircleCI build.
+
+## Migration and infrastructure
+
+The database schema and seed data live under `migrations/`. The compose stack includes:
+
+- app
+- PostgreSQL
+- Redis
+- migration job
+
+The migration job runs all SQL files in filename order and then the app starts only after the database is ready. The same migration module is used by
+the Kubernetes init container so the deployed image matches the one built by
+the pipeline.
