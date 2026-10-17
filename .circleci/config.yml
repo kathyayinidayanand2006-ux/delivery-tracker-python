@@ -94,7 +94,7 @@ jobs:
             : "${DOCKERHUB_TOKEN:?Set DOCKERHUB_TOKEN in CircleCI project environment variables}"
             image="${DOCKERHUB_USER}/delivery-tracker-python"
             short_sha="$(printf '%s' "$CIRCLE_SHA1" | cut -c1-7)"
-            docker login --username "$DOCKERHUB_USER" --password-stdin <<< "$DOCKERHUB_TOKEN"
+            printf '%s' "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USER" --password-stdin
             docker build \
               --tag "${image}:<< parameters.moving_tag >>" \
               --tag "${image}:<< parameters.branch_tag >>-${short_sha}" \
