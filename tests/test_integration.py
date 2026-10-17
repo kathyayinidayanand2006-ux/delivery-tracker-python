@@ -87,6 +87,33 @@ def test_create_order_persists_in_database_and_cache(client):
     assert response.json()["cached"] is True
 
 
+def test_delete_only_removes_terminal_orders_and_drops_cache(client):
+    created = create_order(client)
+    order_id = created["id"]
+
+    active_delete = client.delete(f"/orders/{order_id}")
+    assert active_delete.status_code == 409
+    assert db.one("SELECT id FROM orders WHERE id=%s", (order_id,)) is not None
+
+    for current, target in [
+        ("placed", "accepted"),
+        ("accepted", "cooking"),
+        ("cooking", "out_for_delivery"),
+        ("out_for_delivery", "delivered"),
+    ]:
+        response = client.post(
+            f"/orders/{order_id}/status",
+            json={"to": target, "expected": current},
+        )
+        assert response.status_code == 200
+
+    deleted = client.delete(f"/orders/{order_id}")
+    assert deleted.status_code == 204
+    assert db.one("SELECT id FROM orders WHERE id=%s", (order_id,)) is None
+    assert cache.get_json(f"order:{order_id}") is None
+    assert client.get(f"/orders/{order_id}").status_code == 404
+
+
 def test_status_update_persists_version_and_event(client):
     created = create_order(client)
     order_id = created["id"]

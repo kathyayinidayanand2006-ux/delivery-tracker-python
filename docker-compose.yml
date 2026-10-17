@@ -20,15 +20,14 @@
       retries: 10
 
   migrate:
-    image: postgres:16
+    build: .
+    image: delivery-tracker:local
     depends_on:
       db:
         condition: service_healthy
-    volumes:
-      - ./migrations:/migrations:ro
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - 'for f in /migrations/*.sql; do PGPASSWORD=tracker psql -h db -U tracker -d tracker -v ON_ERROR_STOP=1 -f "$$f"; done'
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://tracker:tracker@db:5432/tracker}
+    command: ["python", "-m", "app.migrate"]
 
   app:
     build: .
@@ -43,3 +42,11 @@
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s

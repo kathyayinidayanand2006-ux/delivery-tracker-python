@@ -2,7 +2,7 @@ import json
 import time
 
 from fastapi import Body, FastAPI, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from . import cache, db
 
@@ -150,6 +150,22 @@ def get_order(oid: int):
     out = snapshot(load(oid))
     cache.set_json(order_key(oid), out, ttl=3600)
     return {**out, "cached": False}
+
+
+@app.delete("/orders/{oid}", status_code=204)
+def delete_order(oid: int):
+    row = db.one(
+        "DELETE FROM orders WHERE id=%s"
+        " AND status IN ('delivered','cancelled') RETURNING id",
+        (oid,),
+    )
+    if row is None:
+        current = db.one("SELECT status FROM orders WHERE id=%s", (oid,))
+        if current is None:
+            raise HTTPException(404, "no order with id %d" % oid)
+        raise HTTPException(409, "only delivered or cancelled orders can be deleted")
+    cache.drop(order_key(oid))
+    return Response(status_code=204)
 
 
 @app.post("/orders/{oid}/status")
