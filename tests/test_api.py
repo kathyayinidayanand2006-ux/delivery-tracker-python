@@ -42,3 +42,10 @@ def test_delete_unknown_order_returns_not_found(monkeypatch):
     with pytest.raises(HTTPException) as error:
         main_module.delete_order(12)
     assert error.value.status_code == 404
+
+
+def test_index_page_returns_html():
+    response = main_module.index()
+    assert response.status_code == 200
+    assert b"Food Delivery Order Tracker" in response.body
+

@@ -2,7 +2,7 @@ import json
 import time
 
 from fastapi import Body, FastAPI, HTTPException, Query
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from . import cache, db
 
@@ -16,6 +16,7 @@ from .states import (
     check_status,
     describe,
 )
+from .ui import UI_HTML
 
 app = FastAPI(title="delivery-tracker")
 
@@ -28,6 +29,11 @@ def order_key(oid):
 
 def channel(oid):
     return "orders:%d" % oid
+
+
+@app.get("/", response_class=HTMLResponse)
+def index():
+    return HTMLResponse(content=UI_HTML)
 
 
 @app.get("/health")
