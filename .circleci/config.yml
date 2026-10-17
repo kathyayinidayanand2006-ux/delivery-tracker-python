@@ -8,7 +8,7 @@ jobs:
       - checkout
       - run:
           name: Scan repository for secrets
-          command: detect --source . --redact --exit-code 1
+          command: gitleaks detect --source . --redact --exit-code 1
 
   lint:
     docker:
